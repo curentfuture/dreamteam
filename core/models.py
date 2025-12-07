@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from collections import defaultdict
 
 @dataclass
 class User:
@@ -89,3 +90,33 @@ class FinancialGoal:
             "priority": self.priority,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
+
+@dataclass
+class UserProfile:
+    """Профиль пользователя с финансовыми метриками"""
+    user_id: int
+    monthly_income: float = 0.0
+    monthly_expenses: float = 0.0
+    average_savings_rate: float = 0.0
+    risk_tolerance: float = 0.5
+    
+    def update_from_transactions(self, transactions: List[Transaction]):
+        monthly_data = self._aggregate_monthly(transactions)
+        self.monthly_income = monthly_data.get("income", 0)
+        self.monthly_expenses = monthly_data.get("expense", 0)
+        
+        if self.monthly_income > 0:
+            self.average_savings_rate = (
+                (self.monthly_income - self.monthly_expenses) / self.monthly_income
+            )
+    
+    def _aggregate_monthly(self, transactions: List[Transaction]) -> Dict[str, float]:
+        monthly_totals = defaultdict(float)
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+        
+        for t in transactions:
+            if t.date.year == current_year and t.date.month == current_month:
+                monthly_totals[t.type] += t.amount
+        
+        return monthly_totals
