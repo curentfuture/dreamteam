@@ -1,10 +1,9 @@
-# main.py - добавь недостающие импорты и логику
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 import json
 import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
 
 # Настройка страницы
 st.set_page_config(
@@ -13,117 +12,293 @@ st.set_page_config(
     layout="wide"
 )
 
-# Инициализация состояния
-def init_session_state():
-    default_states = {
-        'user': None,
-        'goals': [],
-        'transactions': [],
-        'optimization': {},
-        'categories': [
-            "Кафе/Рестораны", "Продукты", "Транспорт", 
-            "Развлечения", "Здоровье", "Образование",
-            "Зарплата", "Инвестиции", "Подарки", "Другое"
-        ],
-        'demo_data_loaded': False
-    }
-    
-    for key, value in default_states.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+# Глобальные функции для загрузки данных
+@st.cache_data
+def load_transaction_data():
+    """Загрузка данных из csvjson.json"""
+    try:
+        with open('data/csvjson.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        df = pd.DataFrame(data)
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Добавляем необходимые колонки если их нет
+        if 'description' not in df.columns:
+            df['description'] = ''
+        
+        return df
+    except Exception as e:
+        st.error(f"Ошибка загрузки данных: {e}")
+        return pd.DataFrame()
 
-def load_demo_data():
-    """Загрузка демо-данных"""
-    if not st.session_state.get('demo_data_loaded', False):
-        # Демо-цели
-        st.session_state.goals = [
-            {
-                "id": 1,
-                "name": "Новый iPhone",
-                "amount": 100000,
-                "saved": 25000,
-                "priority": "Высокий",
-                "target_date": "2024-12-31",
-                "created": "2024-01-15",
-                "active": True
-            },
-            {
-                "id": 2,
-                "name": "Отпуск в Турции",
-                "amount": 150000,
-                "saved": 50000,
-                "priority": "Средний",
-                "target_date": "2024-08-31",
-                "created": "2024-01-10",
-                "active": True
-            }
-        ]
+@st.cache_data
+def get_financial_summary(df):
+    """Расчет финансовой сводки"""
+    if df.empty:
+        return {
+            'total_income': 0,
+            'total_expense': 0,
+            'balance': 0,
+            'transaction_count': 0,
+            'expense_by_category': pd.Series(dtype=float),
+            'income_by_category': pd.Series(dtype=float)
+        }
+    
+    income_df = df[df['type'] == 'income']
+    expense_df = df[df['type'] == 'expense']
+    
+    return {
+        'total_income': income_df['amount'].sum(),
+        'total_expense': abs(expense_df['amount'].sum()),
+        'balance': income_df['amount'].sum() - abs(expense_df['amount'].sum()),
+        'transaction_count': len(df),
+        'expense_by_category': expense_df.groupby('category')['amount'].sum().abs(),
+        'income_by_category': income_df.groupby('category')['amount'].sum()
+    }
+
+@st.cache_data
+def get_goals_progress(df):
+    """Расчет прогресса по целям на основе расходов"""
+    if df.empty:
+        return []
+    
+    expense_by_category = df[df['type'] == 'expense'].groupby('category')['amount'].sum().abs()
+    
+    # Создаем цели на основе категорий расходов
+    goals = []
+    for category, amount in expense_by_category.items():
+        # Цель - сократить расходы по категории на 20%
+        target_amount = amount * 0.8  # Сократить на 20%
+        saved = amount - target_amount  # Уже "сэкономили" если тратим меньше
         
-        # Демо-транзакции
-        st.session_state.transactions = [
-            {"id": 1, "date": "2024-03-01", "amount": -1500, "category": "Кафе/Рестораны", "description": "Кофе и выпечка"},
-            {"id": 2, "date": "2024-03-02", "amount": -3000, "category": "Продукты", "description": "Супермаркет"},
-            {"id": 3, "date": "2024-03-03", "amount": 50000, "category": "Зарплата", "description": "ЗП март"},
-            {"id": 4, "date": "2024-03-05", "amount": -8000, "category": "Развлечения", "description": "Кино и ужин"},
-            {"id": 5, "date": "2024-03-10", "amount": -12000, "category": "Транспорт", "description": "Заправка авто"},
-            {"id": 6, "date": "2024-03-12", "amount": -5000, "category": "Здоровье", "description": "Аптека"},
-            {"id": 7, "date": "2024-03-15", "amount": 20000, "category": "Инвестиции", "description": "Дивиденды"},
-            {"id": 8, "date": "2024-03-20", "amount": -7000, "category": "Образование", "description": "Книги и курсы"},
-        ]
-        
-        st.session_state.demo_data_loaded = True
+        goals.append({
+            'name': f'Сократить {category}',
+            'category': category,
+            'current': amount,
+            'target': target_amount,
+            'saved': max(0, saved),
+            'priority': 'Высокий' if amount > expense_by_category.median() else 'Средний'
+        })
+    
+    return goals
+
+# Инициализация состояния
+if 'user' not in st.session_state:
+    st.session_state.user = None
+if 'custom_goals' not in st.session_state:
+    st.session_state.custom_goals = []
+if 'optimization_rules' not in st.session_state:
+    st.session_state.optimization_rules = {}
 
 def main():
-    init_session_state()
-    
     st.title("💰 Умный финансовый помощник")
     st.markdown("---")
     
     if not st.session_state.user:
         show_auth_page()
     else:
-        if st.session_state.user.get('name') == 'Демо':
-            load_demo_data()
         show_main_app()
 
 def show_auth_page():
-    """Страница авторизации"""
+    """Страница авторизации с улучшенной безопасностью"""
     st.header("🔐 Вход в систему")
     
+    # Вкладки для входа и регистрации
     tab1, tab2 = st.tabs(["Вход", "Регистрация"])
     
     with tab1:
-        username = st.text_input("Логин")
-        password = st.text_input("Пароль", type="password")
+        st.subheader("Вход в аккаунт")
         
-        if st.button("Войти", type="primary"):
-            st.session_state.user = {
-                "username": username,
-                "name": username
-            }
-            st.rerun()
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col2:
+            username = st.text_input("Логин", key="login_username")
+            password = st.text_input("Пароль", type="password", key="login_password")
+            
+            # Запомнить меня
+            remember_me = st.checkbox("Запомнить меня")
+            
+            if st.button("Войти", type="primary", use_container_width=True):
+                if validate_login(username, password):
+                    st.session_state.user = {
+                        "username": username,
+                        "name": get_user_name(username),
+                        "role": "user",
+                        "remember_me": remember_me
+                    }
+                    st.success(f"Добро пожаловать, {st.session_state.user['name']}!")
+                    st.rerun()
+                else:
+                    st.error("Неверный логин или пароль")
+            
+            # Быстрый вход для демо
+            st.markdown("---")
+            st.markdown("**Быстрый доступ:**")
+            
+            demo_col1, demo_col2 = st.columns(2)
+            with demo_col1:
+                if st.button("👑 Админ", use_container_width=True):
+                    st.session_state.user = {
+                        "username": "admin",
+                        "name": "Администратор",
+                        "role": "admin"
+                    }
+                    st.success("Вход как администратор!")
+                    st.rerun()
+            
+            with demo_col2:
+                if st.button("👤 Демо", use_container_width=True):
+                    st.session_state.user = {
+                        "username": "demo",
+                        "name": "Демо Пользователь",
+                        "role": "demo"
+                    }
+                    st.success("Вход в демо-режим!")
+                    st.rerun()
     
     with tab2:
-        new_user = st.text_input("Новый логин")
-        new_pass = st.text_input("Новый пароль", type="password")
+        st.subheader("Создание аккаунта")
         
-        if st.button("Зарегистрироваться"):
-            st.session_state.user = {"username": new_user, "name": new_user}
-            st.rerun()
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col2:
+            new_username = st.text_input("Придумайте логин", key="new_username")
+            new_email = st.text_input("Email", key="new_email")
+            new_password = st.text_input("Придумайте пароль", type="password", key="new_password")
+            
+            # Индикатор сложности пароля
+            if new_password:
+                strength = check_password_strength(new_password)
+                st.progress(strength['score'] / 4)
+                st.caption(f"Сложность: {strength['level']}")
+                
+                if strength['score'] < 2:
+                    st.warning("Пароль слишком простой!")
+            
+            confirm_password = st.text_input("Подтвердите пароль", type="password", key="confirm_password")
+            
+            # Условия использования
+            agree_terms = st.checkbox("Я согласен с условиями использования", key="agree_terms")
+            
+            if st.button("Зарегистрироваться", type="primary", use_container_width=True):
+                if validate_registration(new_username, new_email, new_password, confirm_password, agree_terms):
+                    # Регистрация пользователя
+                    register_user(new_username, new_email, new_password)
+                    
+                    st.session_state.user = {
+                        "username": new_username,
+                        "name": new_username,
+                        "email": new_email,
+                        "role": "user",
+                        "created_at": datetime.now().strftime("%Y-%m-%d")
+                    }
+                    
+                    st.success(f"🎉 Аккаунт {new_username} успешно создан!")
+                    st.balloons()
+                    st.rerun()
+
+def validate_login(username, password):
+    """Валидация логина и пароля"""
+    # В реальном приложении здесь была бы проверка в базе данных
+    # Для демо используем простые проверки
     
-    # Демо-режим
-    st.markdown("---")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🚀 Демо-режим (с данными)", use_container_width=True):
-            st.session_state.user = {"username": "demo", "name": "Демо"}
-            load_demo_data()
-            st.rerun()
+    if not username or not password:
+        return False
     
-    with col2:
-        if st.button("🆕 Начать с чистого листа", use_container_width=True):
-            st.session_state.user = {"username": "new", "name": "Новый пользователь"}
-            st.rerun()
+    # Демо-пользователи
+    demo_users = {
+        "admin": "admin123",
+        "user": "password123",
+        "demo": "demo123"
+    }
+    
+    return demo_users.get(username) == password
+
+def get_user_name(username):
+    """Получение имени пользователя"""
+    names = {
+        "admin": "Администратор",
+        "user": "Пользователь",
+        "demo": "Демо Пользователь"
+    }
+    
+    return names.get(username, username)
+
+def check_password_strength(password):
+    """Проверка сложности пароля"""
+    score = 0
+    feedback = []
+    
+    if len(password) >= 8:
+        score += 1
+    else:
+        feedback.append("Длина должна быть не менее 8 символов")
+    
+    if any(c.isupper() for c in password):
+        score += 1
+    else:
+        feedback.append("Добавьте заглавные буквы")
+    
+    if any(c.isdigit() for c in password):
+        score += 1
+    else:
+        feedback.append("Добавьте цифры")
+    
+    if any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?/" for c in password):
+        score += 1
+    else:
+        feedback.append("Добавьте специальные символы")
+    
+    levels = {
+        0: "Очень слабый",
+        1: "Слабый",
+        2: "Средний",
+        3: "Хороший",
+        4: "Отличный"
+    }
+    
+    return {
+        'score': score,
+        'level': levels.get(score, "Неизвестно"),
+        'feedback': feedback
+    }
+
+def validate_registration(username, email, password, confirm_password, agree_terms):
+    """Валидация данных регистрации"""
+    errors = []
+    
+    if not username:
+        errors.append("Введите логин")
+    elif len(username) < 3:
+        errors.append("Логин должен быть не менее 3 символов")
+    
+    if email and "@" not in email:
+        errors.append("Введите корректный email")
+    
+    if not password:
+        errors.append("Введите пароль")
+    elif len(password) < 8:
+        errors.append("Пароль должен быть не менее 8 символов")
+    
+    if password != confirm_password:
+        errors.append("Пароли не совпадают")
+    
+    if not agree_terms:
+        errors.append("Примите условия использования")
+    
+    if errors:
+        for error in errors:
+            st.error(error)
+        return False
+    
+    return True
+
+def register_user(username, email, password):
+    """Регистрация пользователя (заглушка)"""
+    # В реальном приложении здесь была бы запись в базу данных
+    # с хэшированием пароля
+    pass
 
 def show_main_app():
     """Главное приложение"""
@@ -134,573 +309,375 @@ def show_main_app():
             "📌 Навигация",
             [
                 "📊 Дашборд",
-                "🎯 Мои цели",
+                "🎯 Мои цели", 
                 "💸 Транзакции",
                 "⚡ Оптимизация",
                 "📈 Прогноз",
-                "⚙️ Настройки"
+                "⚙️ Анализ"
             ]
         )
         
-        # Быстрые действия
-        st.markdown("---")
-        st.markdown("### 🚀 Быстрые действия")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("➕ Цель", use_container_width=True):
-                st.session_state.show_new_goal = True
-                st.rerun()
-        
-        with col2:
-            if st.button("💸 Трата", use_container_width=True):
-                st.session_state.show_new_transaction = True
-                st.rerun()
-        
-        # Выход
         st.markdown("---")
         if st.button("🚪 Выйти", type="secondary", use_container_width=True):
             st.session_state.user = None
             st.rerun()
     
-    # Основной контент
+    # Загружаем данные
+    transaction_df = load_transaction_data()
+    
+    if transaction_df.empty:
+        st.error("Не удалось загрузить данные. Проверьте файл data/csvjson.json")
+        return
+    
+    # Отображаем выбранную страницу
     if menu == "📊 Дашборд":
-        show_dashboard()
+        show_dashboard(transaction_df)
     elif menu == "🎯 Мои цели":
-        show_goals_page()
+        show_goals_page(transaction_df)
     elif menu == "💸 Транзакции":
-        show_transactions_page()
+        show_transactions_page(transaction_df)
     elif menu == "⚡ Оптимизация":
-        show_optimization_page()
+        show_optimization_page(transaction_df)
     elif menu == "📈 Прогноз":
-        show_forecast_page()
-    elif menu == "⚙️ Настройки":
-        show_settings_page()
+        show_forecast_page(transaction_df)
+    elif menu == "⚙️ Анализ":
+        show_analysis_page(transaction_df)
 
-def show_dashboard():
-    """Дашборд"""
+def show_dashboard(df):
+    """Дашборд с данными из csvjson.json"""
     st.header("📊 Финансовый дашборд")
     
-    # Базовые метрики
+    # Расчет статистики
+    summary = get_financial_summary(df)
+    
+    # Ключевые метрики
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        total_goals = len(st.session_state.goals)
-        st.metric("🎯 Всего целей", total_goals)
+        st.metric("💰 Всего транзакций", summary['transaction_count'])
     
     with col2:
-        active_goals = len([g for g in st.session_state.goals if g.get('active', True)])
-        st.metric("✅ Активных целей", active_goals)
+        st.metric("📈 Общий доход", f"{summary['total_income']:,.2f} ₽")
     
     with col3:
-        total_needed = sum(g.get('amount', 0) for g in st.session_state.goals)
-        st.metric("💰 Общая сумма", f"{total_needed:,} ₽")
+        st.metric("📉 Общие расходы", f"{summary['total_expense']:,.2f} ₽")
     
     with col4:
-        total_saved = sum(g.get('saved', 0) for g in st.session_state.goals)
-        st.metric("💵 Накоплено", f"{total_saved:,} ₽")
+        st.metric("💵 Баланс", f"{summary['balance']:+,.2f} ₽")
     
     st.markdown("---")
     
     # Последние транзакции
-    if st.session_state.transactions:
-        st.subheader("💸 Последние операции")
-        
-        df = pd.DataFrame(st.session_state.transactions[-5:])
-        df['Сумма'] = df['amount'].apply(lambda x: f"{x:+,.0f} ₽")
-        df['Дата'] = pd.to_datetime(df['date']).dt.strftime('%d.%m.%Y')
-        
-        st.dataframe(
-            df[['Дата', 'category', 'Сумма', 'description']],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Дата": "Дата",
-                "category": "Категория",
-                "Сумма": "Сумма",
-                "description": "Описание"
-            }
-        )
-
-def show_goals_page():
-    """Страница целей"""
-    st.header("🎯 Финансовые цели")
+    st.subheader("💸 Последние операции")
     
-    # Форма создания цели
-    if st.button("➕ Создать новую цель", type="primary"):
-        st.session_state.show_new_goal = True
+    recent_df = df.sort_values('date', ascending=False).head(10).copy()
+    recent_df['Дата'] = recent_df['date'].dt.strftime('%d.%m.%Y')
+    recent_df['Сумма'] = recent_df['amount'].apply(lambda x: f"{x:+,.2f} ₽")
+    recent_df['Тип'] = recent_df['type'].apply(lambda x: '📈 Доход' if x == 'income' else '📉 Трата')
     
-    if st.session_state.get('show_new_goal', False):
-        with st.expander("📝 Новая цель", expanded=True):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                goal_name = st.text_input("Название цели", "Новый iPhone")
-                goal_amount = st.number_input("Сумма (руб)", 100000, step=1000)
-                current_saved = st.number_input("Уже накоплено", 0, step=1000)
-            
-            with col2:
-                priority = st.select_slider("Важность", ["Низкая", "Средняя", "Высокая", "Критическая"])
-                target_date = st.date_input("Цель до", datetime.now() + timedelta(days=180))
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Создать", type="primary"):
-                    st.session_state.goals.append({
-                        "id": len(st.session_state.goals) + 1,
-                        "name": goal_name,
-                        "amount": goal_amount,
-                        "saved": current_saved,
-                        "priority": priority,
-                        "target_date": target_date.strftime("%Y-%m-%d"),
-                        "created": datetime.now().strftime("%Y-%m-%d"),
-                        "active": True
-                    })
-                    st.session_state.show_new_goal = False
-                    st.rerun()
-            
-            with col2:
-                if st.button("❌ Отмена"):
-                    st.session_state.show_new_goal = False
-                    st.rerun()
+    st.dataframe(
+        recent_df[['Дата', 'Тип', 'category', 'Сумма', 'description']],
+        use_container_width=True,
+        hide_index=True
+    )
     
     st.markdown("---")
     
-    # Список целей
-    if st.session_state.goals:
-        st.subheader("📋 Мои цели")
-        for goal in st.session_state.goals:
+    # Анализ расходов по категориям
+    st.subheader("📊 Расходы по категориям")
+    
+    if not summary['expense_by_category'].empty:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Таблица
+            expense_df = pd.DataFrame({
+                'Категория': summary['expense_by_category'].index,
+                'Сумма': summary['expense_by_category'].values
+            }).sort_values('Сумма', ascending=False)
+            
+            st.dataframe(
+                expense_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Сумма": st.column_config.NumberColumn(
+                        format="%.2f ₽"
+                    )
+                }
+            )
+        
+        with col2:
+            # Круговая диаграмма
+            fig, ax = plt.subplots(figsize=(8, 6))
+            ax.pie(
+                summary['expense_by_category'].values,
+                labels=summary['expense_by_category'].index,
+                autopct='%1.1f%%',
+                startangle=90
+            )
+            ax.set_title('Распределение расходов')
+            ax.axis('equal')
+            st.pyplot(fig)
+
+def show_goals_page(df):
+    """Страница целей на основе данных"""
+    st.header("🎯 Финансовые цели")
+    
+    # Автоматические цели на основе расходов
+    auto_goals = get_goals_progress(df)
+    
+    st.info("💡 Цели созданы автоматически на основе ваших расходов по категориям")
+    
+    # Показываем автоматические цели
+    if auto_goals:
+        st.subheader("📋 Автоматические цели")
+        
+        for goal in auto_goals:
             with st.container():
-                progress = goal.get('saved', 0) / goal.get('amount', 1) if goal.get('amount', 0) > 0 else 0
-                remaining = goal.get('amount', 0) - goal.get('saved', 0)
+                progress = goal['saved'] / (goal['current'] - goal['target']) if (goal['current'] - goal['target']) > 0 else 0
                 
-                col1, col2 = st.columns([3, 1])
+                col1, col2, col3 = st.columns([3, 1, 1])
+                
                 with col1:
                     st.markdown(f"#### {goal['name']}")
                     st.progress(min(progress, 1.0))
-                    st.caption(f"{goal.get('saved', 0):,} ₽ из {goal.get('amount', 0):,} ₽ | Приоритет: {goal.get('priority', 'Средняя')}")
+                    st.caption(f"Текущие расходы: {goal['current']:,.0f} ₽ | Цель: {goal['target']:,.0f} ₽")
                 
                 with col2:
-                    st.metric("Осталось", f"{remaining:,} ₽")
+                    remaining = goal['current'] - goal['target']
+                    st.metric("Нужно сократить", f"{remaining:,.0f} ₽")
+                
+                with col3:
+                    st.metric("Приоритет", goal['priority'])
                 
                 st.divider()
-    else:
-        st.info("🎯 У вас пока нет целей. Создайте первую цель!")
+    
+    # Ручные цели пользователя
+    st.subheader("➕ Создать свою цель")
+    
+    with st.form("custom_goal_form"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            goal_name = st.text_input("Название цели")
+            goal_amount = st.number_input("Сумма цели (руб)", 10000, step=1000)
+        
+        with col2:
+            goal_category = st.selectbox(
+                "Категория",
+                ['Накопления', 'Инвестиции', 'Обучение', 'Путешествия', 'Другое']
+            )
+            months = st.slider("Срок (месяцев)", 1, 36, 12)
+        
+        if st.form_submit_button("Добавить цель"):
+            st.session_state.custom_goals.append({
+                'name': goal_name,
+                'amount': goal_amount,
+                'category': goal_category,
+                'months': months,
+                'saved': 0,
+                'created': datetime.now().strftime('%Y-%m-%d')
+            })
+            st.success(f"Цель '{goal_name}' добавлена!")
+            st.rerun()
+    
+    # Показываем ручные цели
+    if st.session_state.custom_goals:
+        st.subheader("📝 Мои цели")
+        
+        for goal in st.session_state.custom_goals:
+            progress = goal['saved'] / goal['amount'] if goal['amount'] > 0 else 0
+            monthly = goal['amount'] / goal['months']
+            
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"**{goal['name']}** ({goal['category']})")
+                st.progress(min(progress, 1.0))
+                st.caption(f"Накоплено: {goal['saved']:,.0f} ₽ из {goal['amount']:,.0f} ₽")
+            
+            with col2:
+                st.metric("В месяц", f"{monthly:,.0f} ₽")
 
-def show_transactions_page():
-    """Страница транзакций с реальными данными из csvjson.json"""
-    st.header("💸 Управление транзакциями")
+def show_transactions_page(df):
+    """Страница транзакций"""
+    st.header("💸 Транзакции")
     
-    # Загрузка данных из csvjson.json
-    @st.cache_data
-    def load_real_transactions():
-        try:
-            # Пробуем загрузить из csvjson.json
-            with open('data/csvjson.json', 'r', encoding='utf-8') as f:
-                transactions_data = json.load(f)
-            
-            # Преобразуем в DataFrame
-            transactions_list = []
-            for item in transactions_data:
-                transactions_list.append({
-                    'date': pd.to_datetime(item['date']),
-                    'amount': item['amount'],
-                    'category': item['category'],
-                    'description': item.get('description', ''),
-                    'type': item['type']
-                })
-            
-            df = pd.DataFrame(transactions_list)
-            
-            # Если нет колонки description, создаем пустую
-            if 'description' not in df.columns:
-                df['description'] = ''
-            
-            return df
-            
-        except FileNotFoundError:
-            st.error("Файл data/csvjson.json не найден!")
-            # Возвращаем пустой DataFrame
-            return pd.DataFrame(columns=['date', 'amount', 'category', 'description', 'type'])
-        except json.JSONDecodeError as e:
-            st.error(f"Ошибка чтения JSON файла: {e}")
-            return pd.DataFrame(columns=['date', 'amount', 'category', 'description', 'type'])
-        except Exception as e:
-            st.error(f"Ошибка загрузки данных: {e}")
-            # Запасной вариант - минимальные данные
-            return pd.DataFrame([{
-                'date': datetime.now() - timedelta(days=10),
-                'amount': -5000,
-                'category': 'Продукты',
-                'description': 'Магазин',
-                'type': 'expense'
-            }])
+    # Проверяем наличие колонки date
+    if 'date' not in df.columns:
+        st.error("В данных отсутствует колонка 'date'")
+        st.write("Доступные колонки:", df.columns.tolist())
+        return
     
-    # Загружаем реальные данные
-    real_df = load_real_transactions()
+    # Фильтры
+    col1, col2, col3 = st.columns(3)
     
-    # Если данные успешно загружены, показываем информацию
-    if not real_df.empty:
-        st.success(f"✅ Загружено {len(real_df)} транзакций из csvjson.json")
+    with col1:
+        start_date = st.date_input(
+            "Начальная дата",
+            df['date'].min().date() if not df.empty else datetime.now().date()
+        )
+    
+    with col2:
+        end_date = st.date_input(
+            "Конечная дата", 
+            df['date'].max().date() if not df.empty else datetime.now().date()
+        )
+    
+    with col3:
+        categories = ['Все'] + sorted(df['category'].unique().tolist())
+        selected_category = st.selectbox("Категория", categories)
+    
+    # Применяем фильтры
+    filtered_df = df.copy()
+    filtered_df = filtered_df[
+        (filtered_df['date'].dt.date >= start_date) & 
+        (filtered_df['date'].dt.date <= end_date)
+    ]
+    
+    if selected_category != 'Все':
+        filtered_df = filtered_df[filtered_df['category'] == selected_category]
+    
+    # Показываем транзакции
+    if not filtered_df.empty:
+        # Статистика
+        st.subheader("📈 Статистика за период")
         
-        # Показываем предварительный просмотр данных
-        with st.expander("📊 Предпросмотр данных", expanded=False):
-            st.write("Первые 10 транзакций из файла:")
-            preview_df = real_df.head(10).copy()
-            preview_df['Дата'] = preview_df['date'].dt.strftime('%d.%m.%Y')
-            preview_df['Сумма'] = preview_df['amount'].apply(lambda x: f"{x:+,.2f} ₽")
-            st.dataframe(preview_df[['Дата', 'category', 'Сумма', 'type']])
-            
-            # Статистика по категориям
-            st.write("**Категории в данных:**")
-            categories = real_df['category'].unique()
-            st.write(f"Всего категорий: {len(categories)}")
-            st.write("Список категорий:", ", ".join(categories[:10]) + ("..." if len(categories) > 10 else ""))
-    else:
-        st.warning("⚠️ Нет данных для отображения. Файл csvjson.json пуст или не найден.")
-    
-    # Объединяем с ручными транзакциями
-    if st.session_state.transactions:
-        manual_df = pd.DataFrame(st.session_state.transactions)
-        manual_df['date'] = pd.to_datetime(manual_df['date'])
-        manual_df['type'] = manual_df['amount'].apply(lambda x: 'expense' if x < 0 else 'income')
-        manual_df['description'] = manual_df.get('description', '')
-        
-        # Объединяем датафреймы
-        all_transactions = pd.concat([real_df, manual_df], ignore_index=True)
-    else:
-        all_transactions = real_df
-    
-    # Форма добавления транзакции
-    if st.button("➕ Добавить транзакцию", type="primary"):
-        st.session_state.show_new_transaction = True
-    
-    if st.session_state.get('show_new_transaction', False):
-        with st.expander("📝 Новая транзакция", expanded=True):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                trans_type = st.radio("Тип", ["Трата", "Доход"])
-                amount = st.number_input("Сумма (руб)", 1000.0, step=100.0)
-                if trans_type == "Трата":
-                    amount = -abs(amount)
-            
-            with col2:
-                # Используем категории из загруженных данных + стандартные
-                all_categories = list(set(list(st.session_state.categories) + list(real_df['category'].unique())))
-                category = st.selectbox("Категория", sorted(all_categories))
-                date = st.date_input("Дата", datetime.now())
-                description = st.text_input("Описание", placeholder="На что потратили?")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Добавить", type="primary"):
-                    new_trans = {
-                        "id": len(st.session_state.transactions) + 1,
-                        "date": date.strftime("%Y-%m-%d"),
-                        "amount": amount,
-                        "category": category,
-                        "description": description
-                    }
-                    st.session_state.transactions.append(new_trans)
-                    st.session_state.show_new_transaction = False
-                    st.success("Транзакция добавлена!")
-                    st.rerun()
-            
-            with col2:
-                if st.button("❌ Отмена"):
-                    st.session_state.show_new_transaction = False
-                    st.rerun()
-    
-    st.markdown("---")
-    
-    # Фильтры и анализ
-    if not all_transactions.empty:
-        st.subheader("📊 Анализ транзакций")
-        
-        # Получаем уникальные категории из данных
-        data_categories = sorted(all_transactions['category'].unique().tolist())
+        period_income = filtered_df[filtered_df['type'] == 'income']['amount'].sum()
+        period_expense = abs(filtered_df[filtered_df['type'] == 'expense']['amount'].sum())
         
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            # Фильтр по периоду
-            period = st.selectbox(
-                "Период",
-                ["Все время", "Последние 30 дней", "Последние 7 дней", "Текущий месяц"]
-            )
+            st.metric("Количество", len(filtered_df))
         
         with col2:
-            # Фильтр по категориям
-            selected_categories = st.multiselect(
-                "Категории",
-                data_categories,
-                default=[]
-            )
+            st.metric("Доходы", f"{period_income:,.2f} ₽")
         
         with col3:
-            # Фильтр по типу
-            filter_type = st.selectbox(
-                "Тип",
-                ["Все", "Только траты", "Только доходы"]
-            )
+            st.metric("Расходы", f"{period_expense:,.2f} ₽")
         
-        # Применяем фильтры
-        filtered_df = all_transactions.copy()
+        # Таблица транзакций
+        st.subheader("📋 Детали транзакций")
         
-        # Фильтр по периоду
-        if period == "Последние 30 дней":
-            cutoff_date = datetime.now() - timedelta(days=30)
-            filtered_df = filtered_df[filtered_df['date'] >= cutoff_date]
-        elif period == "Последние 7 дней":
-            cutoff_date = datetime.now() - timedelta(days=7)
-            filtered_df = filtered_df[filtered_df['date'] >= cutoff_date]
-        elif period == "Текущий месяц":
-            current_month = datetime.now().month
-            filtered_df = filtered_df[filtered_df['date'].dt.month == current_month]
+        display_df = filtered_df.copy()
+        display_df['Дата'] = display_df['date'].dt.strftime('%d.%m.%Y')
+        display_df['Сумма'] = display_df['amount'].apply(lambda x: f"{x:+,.2f} ₽")
+        display_df['Тип'] = display_df['type'].apply(lambda x: '📈 Доход' if x == 'income' else '📉 Трата')
         
-        # Фильтр по категориям
-        if selected_categories:
-            filtered_df = filtered_df[filtered_df['category'].isin(selected_categories)]
+        # СОРТИРОВКА ИСПРАВЛЕНА: сортируем по исходной колонке date, а не по переименованной
+        display_df = display_df.sort_values('date', ascending=False)
         
-        # Фильтр по типу
-        if filter_type == "Только траты":
-            filtered_df = filtered_df[filtered_df['type'] == 'expense']
-        elif filter_type == "Только доходы":
-            filtered_df = filtered_df[filtered_df['type'] == 'income']
+        st.dataframe(
+            display_df[['Дата', 'Тип', 'category', 'Сумма', 'description']],
+            use_container_width=True,
+            hide_index=True
+        )
         
-        # Сортировка по дате
-        filtered_df = filtered_df.sort_values('date', ascending=False)
+        # Топ-5 самых крупных трат
+        st.subheader("🔥 Топ-5 самых крупных трат")
         
-        # Отображение результатов
-        if not filtered_df.empty:
-            # Таблица транзакций
-            st.subheader("📋 История транзакций")
+        top_expenses = filtered_df[filtered_df['type'] == 'expense'].copy()
+        if not top_expenses.empty:
+            top_expenses = top_expenses.nsmallest(5, 'amount')
             
-            display_df = filtered_df.copy()
-            display_df['Дата'] = display_df['date'].dt.strftime('%d.%m.%Y')
-            display_df['Сумма'] = display_df['amount'].apply(lambda x: f"{x:+,.2f} ₽")
-            display_df['Тип'] = display_df['type'].apply(lambda x: '📉 Трата' if x == 'expense' else '📈 Доход')
-            
-            # Ограничиваем количество строк для отображения
-            max_rows = st.slider("Показать строк", 10, 100, 50)
+            top_display = top_expenses.copy()
+            top_display['Дата'] = top_display['date'].dt.strftime('%d.%m.%Y')
+            top_display['Сумма'] = top_display['amount'].apply(lambda x: f"{x:+,.2f} ₽")
+            top_display['abs_amount'] = top_display['amount'].abs()
+            top_display = top_display.sort_values('abs_amount', ascending=False)
             
             st.dataframe(
-                display_df[['Дата', 'Тип', 'category', 'Сумма', 'description']].head(max_rows),
+                top_display[['Дата', 'category', 'Сумма', 'description']],
                 use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Дата": "Дата",
-                    "Тип": "Тип",
-                    "category": "Категория",
-                    "Сумма": "Сумма",
-                    "description": "Описание"
-                }
+                hide_index=True
             )
-            
-            # Статистика
-            st.subheader("📈 Статистика")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                total_count = len(filtered_df)
-                st.metric("Всего операций", total_count)
-            
-            with col2:
-                total_income = filtered_df[filtered_df['type'] == 'income']['amount'].sum()
-                st.metric("📈 Общий доход", f"{total_income:,.2f} ₽")
-            
-            with col3:
-                total_expense = abs(filtered_df[filtered_df['type'] == 'expense']['amount'].sum())
-                st.metric("📉 Общие расходы", f"{total_expense:,.2f} ₽")
-            
-            with col4:
-                balance = total_income - total_expense
-                st.metric("💰 Баланс", f"{balance:+,.2f} ₽")
-            
-            # Анализ по категориям
-            st.subheader("📊 Расходы по категориям")
-            
-            expense_by_category = filtered_df[filtered_df['type'] == 'expense'].groupby('category')['amount'].sum().abs()
-            
-            if not expense_by_category.empty:
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Таблица расходов по категориям
-                    category_df = pd.DataFrame({
-                        'Категория': expense_by_category.index,
-                        'Сумма': expense_by_category.values
-                    }).sort_values('Сумма', ascending=False)
-                    
-                    st.dataframe(
-                        category_df,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "Категория": "Категория",
-                            "Сумма": st.column_config.NumberColumn(
-                                "Сумма (₽)",
-                                format="%.2f ₽"
-                            )
-                        }
-                    )
-                
-                with col2:
-                    # Круговая диаграмма
-                    if len(expense_by_category) > 0:
-                        fig, ax = plt.subplots(figsize=(8, 8))
-                        wedges, texts, autotexts = ax.pie(
-                            expense_by_category.values, 
-                            labels=expense_by_category.index, 
-                            autopct='%1.1f%%',
-                            startangle=90
-                        )
-                        ax.set_title('Распределение расходов по категориям')
-                        ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle
-                        st.pyplot(fig)
-            
-            # Топ-5 самых крупных трат
-            st.subheader("🔥 Топ-5 самых крупных трат")
-
-            top_expenses = filtered_df[filtered_df['type'] == 'expense'].copy()
-            if not top_expenses.empty:
-                # Берем 5 самых крупных трат (самые отрицательные значения)
-                top_expenses = top_expenses.nsmallest(5, 'amount')  # nsmallest потому что траты отрицательные
-                
-                top_expenses_display = top_expenses.copy()
-                top_expenses_display['Дата'] = top_expenses_display['date'].dt.strftime('%d.%m.%Y')
-                top_expenses_display['Сумма'] = top_expenses_display['amount'].apply(lambda x: f"{x:+,.2f} ₽")
-                
-                # Сортируем по абсолютному значению (самые крупные сверху)
-                top_expenses_display['abs_amount'] = top_expenses_display['amount'].abs()
-                top_expenses_display = top_expenses_display.sort_values('abs_amount', ascending=False)
-                
-                st.dataframe(
-                    top_expenses_display[['Дата', 'category', 'Сумма', 'description']],
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Дата": "Дата",
-                        "category": "Категория",
-                        "Сумма": "Сумма",
-                        "description": "Описание"
-                    }
-                )
-            
-            # График расходов по времени
-            st.subheader("📅 Динамика расходов")
-            
-            if not filtered_df.empty:
-                # Группировка по дате
-                daily_expenses = filtered_df[filtered_df['type'] == 'expense'].copy()
-                if not daily_expenses.empty:
-                    daily_expenses['day'] = daily_expenses['date'].dt.date
-                    daily_totals = daily_expenses.groupby('day')['amount'].sum().abs()
-                    
-                    if not daily_totals.empty:
-                        # Линейный график
-                        st.line_chart(daily_totals)
-        
-        else:
-            st.info("Нет транзакций по выбранным фильтрам")
-    
     else:
-        st.info("💸 Нет транзакций для отображения. Добавьте транзакции или проверьте файл данных.")
+        st.info("Нет транзакций за выбранный период")
 
-def show_optimization_page():
-    """Страница оптимизации - ТЕПЕРЬ РАБОТАЕТ!"""
+def show_optimization_page(df):
+    """Страница оптимизации расходов"""
     st.header("⚡ Оптимизация расходов")
     
-    st.info("""
-    💡 **Как это работает:**
-    1. Укажите на сколько процентов готовы сократить каждую категорию расходов
-    2. Система рассчитает сколько вы сэкономите в месяц
-    3. Увидите как это повлияет на достижение ваших целей
-    """)
+    if df.empty:
+        st.info("Нет данных для анализа")
+        return
     
-    # Текущие расходы (мок-данные)
-    expense_categories = {
-        "Кафе/Рестораны": {"amount": 15000, "importance": "Низкая"},
-        "Продукты": {"amount": 25000, "importance": "Высокая"},
-        "Транспорт": {"amount": 12000, "importance": "Средняя"},
-        "Развлечения": {"amount": 8000, "importance": "Низкая"},
-        "Подписки": {"amount": 3000, "importance": "Низкая"},
-        "Одежда": {"amount": 7000, "importance": "Средняя"}
-    }
+    expense_by_category = df[df['type'] == 'expense'].groupby('category')['amount'].sum().abs()
     
-    st.subheader("📊 Ваши текущие расходы")
+    if expense_by_category.empty:
+        st.info("Нет данных о расходах")
+        return
     
-    # Показываем расходы и слайдеры
-    optimization_results = {}
+    st.subheader("📊 Ваши текущие расходы по категориям")
     
-    for category, data in expense_categories.items():
+    # Показываем расходы и предлагаем оптимизацию
+    optimization_suggestions = []
+    
+    for category, amount in expense_by_category.items():
         col1, col2, col3 = st.columns([2, 1, 2])
         
         with col1:
             st.write(f"**{category}**")
-            st.caption(f"Важность: {data['importance']}")
         
         with col2:
-            st.metric("В месяц", f"{data['amount']:,} руб")
+            st.metric("В месяц", f"{amount:,.0f} ₽")
         
         with col3:
             reduction = st.slider(
                 f"Сократить %",
-                min_value=0,
-                max_value=50,
-                value=0,
-                step=5,
+                0, 50, 0, 5,
                 key=f"opt_{category}",
                 label_visibility="collapsed"
             )
             
             if reduction > 0:
-                savings = data["amount"] * reduction / 100
-                optimization_results[category] = {
-                    "savings": savings,
-                    "reduction": reduction,
-                    "original": data["amount"]
-                }
+                savings = amount * reduction / 100
+                optimization_suggestions.append({
+                    'category': category,
+                    'current': amount,
+                    'reduction': reduction,
+                    'savings': savings
+                })
     
     st.markdown("---")
     
-    # Кнопка расчета
-    if st.button("🧮 Рассчитать эффект оптимизации", type="primary"):
-        st.balloons()
-        if optimization_results:
-            total_savings = sum(item["savings"] for item in optimization_results.values())
-            
-            st.success(f"💰 **Общая экономия: {total_savings:,.0f} руб/мес**")
-            
-            # Показываем детали
-            with st.expander("📋 Детали оптимизации"):
-                for category, data in optimization_results.items():
-                    st.write(f"**{category}**: -{data['reduction']}% = {data['savings']:.0f} руб/мес")
-            
-            # Влияние на цели
-            if st.session_state.goals:
-                st.subheader("🎯 Влияние на ваши цели")
+    # Расчет эффекта оптимизации
+    if optimization_suggestions:
+        total_savings = sum(item['savings'] for item in optimization_suggestions)
+        
+        st.success(f"💰 **Общая экономия: {total_savings:,.0f} руб/мес**")
+        
+        # Показываем детали
+        with st.expander("📋 Детали оптимизации"):
+            for item in optimization_suggestions:
+                st.write(f"**{item['category']}**: -{item['reduction']}% = {item['savings']:.0f} руб/мес")
+        
+        # Расчет влияния на цели
+        st.subheader("🎯 Влияние на ваши цели")
+        
+        # Предполагаем, что сэкономленные деньги идут в накопления
+        if st.session_state.custom_goals:
+            for goal in st.session_state.custom_goals[:3]:  # Первые 3 цели
+                remaining = goal['amount'] - goal['saved']
                 
-                for goal in st.session_state.goals:
-                    remaining = goal["amount"] - goal["saved"]
+                # Без оптимизации
+                base_monthly = goal['amount'] / goal['months'] if goal['months'] > 0 else 0
+                months_without = remaining / base_monthly if base_monthly > 0 else 999
+                
+                # С оптимизацией
+                months_with = remaining / (base_monthly + total_savings) if (base_monthly + total_savings) > 0 else 999
+                
+                faster_by = months_without - months_with
+                
+                if faster_by > 0:
+                    col1, col2 = st.columns(2)
                     
-                    # Без оптимизации (предположим что откладываем 10% от средней зарплаты)
-                    base_monthly_saving = 15000  # пример
-                    months_without = remaining / base_monthly_saving if base_monthly_saving > 0 else 999
-                    
-                    # С оптимизацией
-                    months_with = remaining / (base_monthly_saving + total_savings) if (base_monthly_saving + total_savings) > 0 else 999
-                    
-                    faster_by = months_without - months_with
-                    
-                    col1, col2, col3 = st.columns(3)
                     with col1:
                         st.metric(
                             f"Без оптимизации",
-                            f"{months_without:.1f} мес",
-                            delta=f"{(datetime.now() + timedelta(days=months_without*30)).strftime('%d.%m.%Y')}"
+                            f"{months_without:.1f} мес"
                         )
                     
                     with col2:
@@ -710,215 +687,182 @@ def show_optimization_page():
                             delta=f"-{faster_by:.1f} мес"
                         )
                     
-                    with col3:
-                        percent_faster = (faster_by / months_without) * 100 if months_without > 0 else 0
-                        st.metric(
-                            "Эффект",
-                            f"{percent_faster:.0f}% быстрее",
-                            delta=f"{faster_by:.1f} мес"
-                        )
-                    
                     st.divider()
-            else:
-                st.info("🎯 Создайте финансовую цель чтобы увидеть эффект оптимизации!")
         else:
-            st.warning("Выберите категории для сокращения чтобы увидеть эффект")
+            st.info("Создайте цели чтобы увидеть полный эффект оптимизации")
+    else:
+        st.warning("Выберите категории для сокращения чтобы увидеть эффект")
 
-def show_forecast_page():
-    """Страница прогноза - ТЕПЕРЬ РАБОТАЕТ!"""
+def show_forecast_page(df):
+    """Страница прогноза"""
     st.header("📈 Прогноз накоплений")
     
-    if not st.session_state.goals:
-        st.info("🎯 Сначала создайте финансовую цель на странице 'Мои цели'")
+    if df.empty:
+        st.info("Нет данных для прогноза")
         return
     
-    # Выбор цели
-    goal_names = [f"{g['name']} ({g['amount']:,} руб)" for g in st.session_state.goals]
-    selected_goal_idx = st.selectbox("Выберите цель", range(len(goal_names)), format_func=lambda x: goal_names[x])
+    # Анализ текущих доходов и расходов
+    monthly_income = df[df['type'] == 'income']['amount'].sum() / 3  # Предполагаем 3 месяца данных
+    monthly_expense = abs(df[df['type'] == 'expense']['amount'].sum()) / 3
     
-    if selected_goal_idx is not None:
-        goal = st.session_state.goals[selected_goal_idx]
-        remaining = goal["amount"] - goal["saved"]
+    current_savings_rate = monthly_income - monthly_expense
+    
+    st.subheader("📊 Текущая ситуация")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("📈 Средний доход", f"{monthly_income:,.0f} ₽/мес")
+    
+    with col2:
+        st.metric("📉 Средние расходы", f"{monthly_expense:,.0f} ₽/мес")
+    
+    with col3:
+        st.metric("💵 Текущее накопление", f"{current_savings_rate:,.0f} ₽/мес")
+    
+    st.markdown("---")
+    
+    # Прогноз для целей
+    if st.session_state.custom_goals:
+        st.subheader("🎯 Прогноз по вашим целям")
         
-        st.subheader(f"Прогноз для: {goal['name']}")
-        st.write(f"💰 Осталось накопить: **{remaining:,} руб**")
-        
-        # Параметры прогноза
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            monthly_saving = st.number_input(
-                "Ежемесячное накопление (руб)",
-                min_value=1000,
-                value=15000,
-                step=1000,
-                help="Сколько готовы откладывать каждый месяц"
-            )
-        
-        with col2:
-            investment_return = st.slider(
-                "Доходность инвестиций (% годовых)",
-                min_value=0.0,
-                max_value=15.0,
-                value=7.0,
-                step=0.5,
-                help="Предполагаемая доходность инвестиций"
-            )
-        
-        # Расчеты
-        st.markdown("---")
-        
-        # Простой расчет (без инвестиций)
-        months_no_invest = remaining / monthly_saving if monthly_saving > 0 else 999
-        
-        # Расчет с инвестициями (упрощенная формула)
-        monthly_rate = investment_return / 12 / 100
-        if monthly_rate > 0:
-            # FV = PV * (1 + r)^n + PMT * ((1 + r)^n - 1) / r
-            # Решаем для n (количество месяцев)
-            try:
-                # Используем численное решение
+        for goal in st.session_state.custom_goals:
+            remaining = goal['amount'] - goal['saved']
+            
+            # Параметры прогноза
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                monthly_input = st.number_input(
+                    f"Ежемесячное накопление для '{goal['name']}'",
+                    min_value=1000.0,
+                    value=float(current_savings_rate) if current_savings_rate > 0 else 10000.0,
+                    step=1000.0,
+                    key=f"monthly_{goal['name']}"
+                )
+            
+            with col2:
+                return_rate = st.slider(
+                    "Доходность инвестиций (% годовых)",
+                    0.0, 15.0, 7.0, 0.5,
+                    key=f"return_{goal['name']}"
+                )
+            
+            # Расчеты
+            months_no_invest = remaining / monthly_input if monthly_input > 0 else 999
+            
+            # С инвестициями
+            monthly_return = return_rate / 12 / 100
+            if monthly_return > 0:
                 n = 0
-                current = goal["saved"]
-                while current < goal["amount"] and n < 600:  # максимум 50 лет
-                    current = current * (1 + monthly_rate) + monthly_saving
+                current = goal['saved']
+                while current < goal['amount'] and n < 600:
+                    current = current * (1 + monthly_return) + monthly_input
                     n += 1
                 months_with_invest = n
-            except:
+            else:
                 months_with_invest = months_no_invest
-        else:
-            months_with_invest = months_no_invest
-        
-        # Отображение результатов
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric(
-                "Без инвестиций",
-                f"{months_no_invest:.1f} мес",
-                delta=f"{(datetime.now() + timedelta(days=months_no_invest*30)).strftime('%d.%m.%Y')}"
-            )
-        
-        with col2:
-            st.metric(
-                f"С инвестициями ({investment_return}%)",
-                f"{months_with_invest:.1f} мес",
-                delta=f"-{months_no_invest - months_with_invest:.1f} мес"
-            )
-        
-        with col3:
-            percent_faster = ((months_no_invest - months_with_invest) / months_no_invest) * 100 if months_no_invest > 0 else 0
-            st.metric(
-                "Выгода",
-                f"{percent_faster:.0f}% быстрее",
-                delta="Инвестиции ускоряют!"
-            )
-        
-        # График накоплений
-        st.subheader("📊 График накоплений")
-        
-        # Генерируем данные для графика
-        months_to_plot = int(min(max(months_no_invest, months_with_invest), 60)) + 1  # максимум 5 лет
-        
-        timeline = list(range(months_to_plot + 1))
-        
-        # Без инвестиций
-        savings_no_invest = [goal["saved"]]
-        for i in range(months_to_plot):
-            new_amount = savings_no_invest[-1] + monthly_saving
-            savings_no_invest.append(min(goal["amount"], new_amount))
-        
-        # С инвестициями
-        savings_with_invest = [goal["saved"]]
-        for i in range(months_to_plot):
-            new_amount = savings_with_invest[-1] * (1 + monthly_rate) + monthly_saving
-            savings_with_invest.append(min(goal["amount"], new_amount))
-        
-        # Создаем DataFrame для графика
-        chart_data = pd.DataFrame({
-            "Месяц": timeline * 2,
-            "Накопления": savings_no_invest + savings_with_invest,
-            "Сценарий": ["Без инвестиций"] * len(timeline) + [f"С инвестициями ({investment_return}%)"] * len(timeline)
-        })
-        
-        # Линейный график
-        st.line_chart(chart_data, x="Месяц", y="Накопления", color="Сценарий")
-        
-        # Дополнительная информация
-        with st.expander("💡 Рекомендации по инвестициям"):
-            st.write("""
-            **Консервативная стратегия (3-6% годовых):**
-            - Банковские вклады
-            - Облигации федерального займа (ОФЗ)
-            - Корпоративные облигации
             
-            **Умеренная стратегия (6-10% годовых):**
-            - ETF на индексы (S&P 500, МосБиржи)
-            - Дивидендные акции
-            - ПИФы
+            # Отображение
+            col1, col2 = st.columns(2)
             
-            **Агрессивная стратегия (10%+ годовых):**
-            - Акции роста
-            - Венчурные инвестиции
-            - Криптовалюты (высокий риск!)
+            with col1:
+                st.metric(
+                    "Без инвестиций",
+                    f"{months_no_invest:.1f} мес"
+                )
             
-            ⚠️ **Важно:** Чем выше потенциальная доходность, тем выше риски.
-            """)
+            with col2:
+                st.metric(
+                    f"С инвестициями ({return_rate}%)",
+                    f"{months_with_invest:.1f} мес",
+                    delta=f"-{months_no_invest - months_with_invest:.1f} мес"
+                )
+            
+            st.divider()
+    else:
+        st.info("Создайте финансовые цели чтобы увидеть прогноз")
 
-def show_settings_page():
-    """Настройки"""
-    st.header("⚙️ Настройки")
+def show_analysis_page(df):
+    """Страница углубленного анализа"""
+    st.header("⚙️ Детальный анализ")
     
-    with st.expander("📁 Категории расходов"):
-        st.write("Настройте категории для лучшего анализа расходов")
-        
-        # Показываем текущие категории
-        st.write("**Текущие категории:**")
-        cols = st.columns(3)
-        for i, category in enumerate(st.session_state.categories):
-            with cols[i % 3]:
-                if st.button(f"🗑️ {category}", key=f"del_{category}"):
-                    if category not in ["Зарплата", "Другое"]:
-                        st.session_state.categories.remove(category)
-                        st.rerun()
-        
-        # Добавление новой категории
-        st.markdown("---")
-        new_category = st.text_input("Добавить новую категорию")
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            if st.button("➕ Добавить категорию"):
-                if new_category and new_category not in st.session_state.categories:
-                    st.session_state.categories.append(new_category)
-                    st.success(f"Категория '{new_category}' добавлена!")
-                    st.rerun()
-        
-        with col2:
-            if st.button("🔄 Сбросить"):
-                st.session_state.categories = [
-                    "Кафе/Рестораны", "Продукты", "Транспорт", 
-                    "Развлечения", "Здоровье", "Образование",
-                    "Зарплата", "Инвестиции", "Подарки", "Другое"
-                ]
-                st.success("Категории сброшены!")
-                st.rerun()
+    if df.empty:
+        st.info("Нет данных для анализа")
+        return
     
-    with st.expander("🧹 Очистка данных"):
-        st.warning("⚠️ Это действие нельзя отменить!")
+    # Анализ по времени
+    st.subheader("📅 Анализ по времени")
+    
+    df['month'] = df['date'].dt.to_period('M')
+    monthly_data = df.groupby(['month', 'type'])['amount'].sum().unstack(fill_value=0)
+    
+    if not monthly_data.empty:
+        # График доходов и расходов по месяцам
+        fig, ax = plt.subplots(figsize=(10, 6))
         
+        if 'income' in monthly_data.columns:
+            ax.plot(monthly_data.index.astype(str), monthly_data['income'], label='Доходы', marker='o')
+        
+        if 'expense' in monthly_data.columns:
+            ax.plot(monthly_data.index.astype(str), abs(monthly_data['expense']), label='Расходы', marker='s')
+        
+        ax.set_xlabel('Месяц')
+        ax.set_ylabel('Сумма (руб)')
+        ax.set_title('Динамика доходов и расходов')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        
+        st.pyplot(fig)
+    
+    # Анализ привычек
+    st.subheader("📊 Анализ финансовых привычек")
+    
+    # Самые частые категории трат
+    frequent_categories = df[df['type'] == 'expense']['category'].value_counts().head(5)
+    
+    if not frequent_categories.empty:
         col1, col2 = st.columns(2)
+        
         with col1:
-            if st.button("🗑️ Очистить все цели", type="secondary"):
-                st.session_state.goals = []
-                st.success("Все цели удалены!")
-                st.rerun()
+            st.write("**Самые частые категории трат:**")
+            for category, count in frequent_categories.items():
+                st.write(f"• {category}: {count} раз")
         
         with col2:
-            if st.button("🗑️ Очистить все транзакции", type="secondary"):
-                st.session_state.transactions = []
-                st.success("Все транзакции удалены!")
-                st.rerun()
+            # Дни недели с наибольшими тратами
+            df['weekday'] = df['date'].dt.day_name()
+            weekday_expenses = df[df['type'] == 'expense'].groupby('weekday')['amount'].sum().abs()
+            
+            if not weekday_expenses.empty:
+                st.write("**Траты по дням недели:**")
+                for day, amount in weekday_expenses.sort_values(ascending=False).items():
+                    st.write(f"• {day}: {amount:,.0f} руб")
+    
+    # Рекомендации
+    st.subheader("💡 Рекомендации")
+    
+    expense_by_category = df[df['type'] == 'expense'].groupby('category')['amount'].sum().abs()
+    
+    if not expense_by_category.empty:
+        # Находим категорию с наибольшими расходами
+        max_category = expense_by_category.idxmax()
+        max_amount = expense_by_category.max()
+        
+        st.info(f"**Основная статья расходов:** {max_category} ({max_amount:,.0f} руб)")
+        
+        # Простые рекомендации
+        recommendations = [
+            f"Рассмотрите возможность сокращения расходов на {max_category}",
+            "Автоматизируйте накопления: настройте автоперевод 10% от дохода",
+            "Ведите учет ежедневных мелких расходов",
+            "Установите лимиты по категориям расходов",
+            "Планируйте крупные покупки заранее"
+        ]
+        
+        for rec in recommendations:
+            st.write(f"• {rec}")
 
 if __name__ == "__main__":
     main()
