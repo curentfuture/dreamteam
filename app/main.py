@@ -288,49 +288,46 @@ def show_goals_page():
         st.info("🎯 У вас пока нет целей. Создайте первую цель!")
 
 def show_transactions_page():
-    """Страница транзакций с мок-данными"""
+    """Страница транзакций с реальными данными из csvjson.json"""
     st.header("💸 Управление транзакциями")
     
-    # Загрузка мок-данных
+    # Загрузка данных из csvjson.json
     @st.cache_data
-    def load_mock_transactions():
+    def load_real_transactions():
         try:
-            with open('data/mock_transactions.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            # Пробуем загрузить из csvjson.json
+            with open('data/csvjson.json', 'r', encoding='utf-8') as f:
+                transactions_data = json.load(f)
             
-            # Создаем DataFrame с транзакциями
-            transactions = []
-            for category, items in data['categories'].items():
-                for item in items:
-                    date = datetime.now() - timedelta(days=item['days_ago'])
-                    transactions.append({
-                        'date': date,
-                        'amount': item['amount'],
-                        'category': category,
-                        'description': item['description'],
-                        'type': 'expense' if item['amount'] < 0 else 'income'
-                    })
+            # Преобразуем в DataFrame
+            transactions_list = []
+            for item in transactions_data:
+                transactions_list.append({
+                    'date': pd.to_datetime(item['date']),
+                    'amount': item['amount'],
+                    'category': item['category'],
+                    'description': item.get('description', ''),
+                    'type': item['type']
+                })
             
-            # Добавляем регулярные доходы
-            transactions.append({
-                'date': datetime.now() - timedelta(days=5),
-                'amount': 75000,
-                'category': 'Зарплата',
-                'description': 'Зарплата',
-                'type': 'income'
-            })
+            df = pd.DataFrame(transactions_list)
             
-            transactions.append({
-                'date': datetime.now() - timedelta(days=35),
-                'amount': 65000,
-                'category': 'Зарплата',
-                'description': 'Зарплата',
-                'type': 'income'
-            })
+            # Если нет колонки description, создаем пустую
+            if 'description' not in df.columns:
+                df['description'] = ''
             
-            return pd.DataFrame(transactions)
-        except:
-            # Если файла нет, создаем минимальные данные
+            return df
+            
+        except FileNotFoundError:
+            st.error("Файл data/csvjson.json не найден!")
+            # Возвращаем пустой DataFrame
+            return pd.DataFrame(columns=['date', 'amount', 'category', 'description', 'type'])
+        except json.JSONDecodeError as e:
+            st.error(f"Ошибка чтения JSON файла: {e}")
+            return pd.DataFrame(columns=['date', 'amount', 'category', 'description', 'type'])
+        except Exception as e:
+            st.error(f"Ошибка загрузки данных: {e}")
+            # Запасной вариант - минимальные данные
             return pd.DataFrame([{
                 'date': datetime.now() - timedelta(days=10),
                 'amount': -5000,
@@ -339,19 +336,40 @@ def show_transactions_page():
                 'type': 'expense'
             }])
     
-    # Загружаем мок-данные
-    mock_df = load_mock_transactions()
+    # Загружаем реальные данные
+    real_df = load_real_transactions()
+    
+    # Если данные успешно загружены, показываем информацию
+    if not real_df.empty:
+        st.success(f"✅ Загружено {len(real_df)} транзакций из csvjson.json")
+        
+        # Показываем предварительный просмотр данных
+        with st.expander("📊 Предпросмотр данных", expanded=False):
+            st.write("Первые 10 транзакций из файла:")
+            preview_df = real_df.head(10).copy()
+            preview_df['Дата'] = preview_df['date'].dt.strftime('%d.%m.%Y')
+            preview_df['Сумма'] = preview_df['amount'].apply(lambda x: f"{x:+,.2f} ₽")
+            st.dataframe(preview_df[['Дата', 'category', 'Сумма', 'type']])
+            
+            # Статистика по категориям
+            st.write("**Категории в данных:**")
+            categories = real_df['category'].unique()
+            st.write(f"Всего категорий: {len(categories)}")
+            st.write("Список категорий:", ", ".join(categories[:10]) + ("..." if len(categories) > 10 else ""))
+    else:
+        st.warning("⚠️ Нет данных для отображения. Файл csvjson.json пуст или не найден.")
     
     # Объединяем с ручными транзакциями
     if st.session_state.transactions:
         manual_df = pd.DataFrame(st.session_state.transactions)
         manual_df['date'] = pd.to_datetime(manual_df['date'])
         manual_df['type'] = manual_df['amount'].apply(lambda x: 'expense' if x < 0 else 'income')
+        manual_df['description'] = manual_df.get('description', '')
         
         # Объединяем датафреймы
-        all_transactions = pd.concat([mock_df, manual_df], ignore_index=True)
+        all_transactions = pd.concat([real_df, manual_df], ignore_index=True)
     else:
-        all_transactions = mock_df
+        all_transactions = real_df
     
     # Форма добавления транзакции
     if st.button("➕ Добавить транзакцию", type="primary"):
@@ -368,7 +386,9 @@ def show_transactions_page():
                     amount = -abs(amount)
             
             with col2:
-                category = st.selectbox("Категория", st.session_state.categories)
+                # Используем категории из загруженных данных + стандартные
+                all_categories = list(set(list(st.session_state.categories) + list(real_df['category'].unique())))
+                category = st.selectbox("Категория", sorted(all_categories))
                 date = st.date_input("Дата", datetime.now())
                 description = st.text_input("Описание", placeholder="На что потратили?")
             
@@ -395,154 +415,199 @@ def show_transactions_page():
     st.markdown("---")
     
     # Фильтры и анализ
-    st.subheader("📊 Анализ транзакций")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        # Фильтр по периоду
-        period = st.selectbox(
-            "Период",
-            ["Все время", "Последние 30 дней", "Последние 7 дней", "Текущий месяц"]
-        )
-    
-    with col2:
-        # Фильтр по категориям
-        selected_categories = st.multiselect(
-            "Категории",
-            st.session_state.categories,
-            default=[]
-        )
-    
-    with col3:
-        # Фильтр по типу
-        filter_type = st.selectbox(
-            "Тип",
-            ["Все", "Только траты", "Только доходы"]
-        )
-    
-    # Применяем фильтры
-    filtered_df = all_transactions.copy()
-    
-    # Фильтр по периоду
-    if period == "Последние 30 дней":
-        cutoff_date = datetime.now() - timedelta(days=30)
-        filtered_df = filtered_df[filtered_df['date'] >= cutoff_date]
-    elif period == "Последние 7 дней":
-        cutoff_date = datetime.now() - timedelta(days=7)
-        filtered_df = filtered_df[filtered_df['date'] >= cutoff_date]
-    elif period == "Текущий месяц":
-        current_month = datetime.now().month
-        filtered_df = filtered_df[filtered_df['date'].dt.month == current_month]
-    
-    # Фильтр по категориям
-    if selected_categories:
-        filtered_df = filtered_df[filtered_df['category'].isin(selected_categories)]
-    
-    # Фильтр по типу
-    if filter_type == "Только траты":
-        filtered_df = filtered_df[filtered_df['amount'] < 0]
-    elif filter_type == "Только доходы":
-        filtered_df = filtered_df[filtered_df['amount'] > 0]
-    
-    # Сортировка по дате
-    filtered_df = filtered_df.sort_values('date', ascending=False)
-    
-    # Отображение результатов
-    if not filtered_df.empty:
-        # Таблица транзакций
-        st.subheader("📋 История транзакций")
+    if not all_transactions.empty:
+        st.subheader("📊 Анализ транзакций")
         
-        display_df = filtered_df.copy()
-        display_df['Дата'] = display_df['date'].dt.strftime('%d.%m.%Y')
-        display_df['Сумма'] = display_df['amount'].apply(lambda x: f"{x:+,.0f} ₽")
-        display_df['Тип'] = display_df['type'].apply(lambda x: '📉 Трата' if x == 'expense' else '📈 Доход')
+        # Получаем уникальные категории из данных
+        data_categories = sorted(all_transactions['category'].unique().tolist())
         
-        st.dataframe(
-            display_df[['Дата', 'Тип', 'category', 'Сумма', 'description']].head(20),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Дата": "Дата",
-                "Тип": "Тип",
-                "category": "Категория",
-                "Сумма": "Сумма",
-                "description": "Описание"
-            }
-        )
-        
-        # Статистика
-        st.subheader("📈 Статистика")
-        
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            total_count = len(filtered_df)
-            st.metric("Всего операций", total_count)
+            # Фильтр по периоду
+            period = st.selectbox(
+                "Период",
+                ["Все время", "Последние 30 дней", "Последние 7 дней", "Текущий месяц"]
+            )
         
         with col2:
-            total_income = filtered_df[filtered_df['amount'] > 0]['amount'].sum()
-            st.metric("📈 Общий доход", f"{total_income:,.0f} ₽")
+            # Фильтр по категориям
+            selected_categories = st.multiselect(
+                "Категории",
+                data_categories,
+                default=[]
+            )
         
         with col3:
-            total_expense = abs(filtered_df[filtered_df['amount'] < 0]['amount'].sum())
-            st.metric("📉 Общие расходы", f"{total_expense:,.0f} ₽")
+            # Фильтр по типу
+            filter_type = st.selectbox(
+                "Тип",
+                ["Все", "Только траты", "Только доходы"]
+            )
         
-        with col4:
-            balance = total_income - total_expense
-            st.metric("💰 Баланс", f"{balance:+,.0f} ₽")
+        # Применяем фильтры
+        filtered_df = all_transactions.copy()
         
-        # Анализ по категориям
-        st.subheader("📊 Расходы по категориям")
+        # Фильтр по периоду
+        if period == "Последние 30 дней":
+            cutoff_date = datetime.now() - timedelta(days=30)
+            filtered_df = filtered_df[filtered_df['date'] >= cutoff_date]
+        elif period == "Последние 7 дней":
+            cutoff_date = datetime.now() - timedelta(days=7)
+            filtered_df = filtered_df[filtered_df['date'] >= cutoff_date]
+        elif period == "Текущий месяц":
+            current_month = datetime.now().month
+            filtered_df = filtered_df[filtered_df['date'].dt.month == current_month]
         
-        expense_by_category = filtered_df[filtered_df['amount'] < 0].groupby('category')['amount'].sum().abs()
+        # Фильтр по категориям
+        if selected_categories:
+            filtered_df = filtered_df[filtered_df['category'].isin(selected_categories)]
         
-        if not expense_by_category.empty:
-            col1, col2 = st.columns(2)
+        # Фильтр по типу
+        if filter_type == "Только траты":
+            filtered_df = filtered_df[filtered_df['type'] == 'expense']
+        elif filter_type == "Только доходы":
+            filtered_df = filtered_df[filtered_df['type'] == 'income']
+        
+        # Сортировка по дате
+        filtered_df = filtered_df.sort_values('date', ascending=False)
+        
+        # Отображение результатов
+        if not filtered_df.empty:
+            # Таблица транзакций
+            st.subheader("📋 История транзакций")
+            
+            display_df = filtered_df.copy()
+            display_df['Дата'] = display_df['date'].dt.strftime('%d.%m.%Y')
+            display_df['Сумма'] = display_df['amount'].apply(lambda x: f"{x:+,.2f} ₽")
+            display_df['Тип'] = display_df['type'].apply(lambda x: '📉 Трата' if x == 'expense' else '📈 Доход')
+            
+            # Ограничиваем количество строк для отображения
+            max_rows = st.slider("Показать строк", 10, 100, 50)
+            
+            st.dataframe(
+                display_df[['Дата', 'Тип', 'category', 'Сумма', 'description']].head(max_rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Дата": "Дата",
+                    "Тип": "Тип",
+                    "category": "Категория",
+                    "Сумма": "Сумма",
+                    "description": "Описание"
+                }
+            )
+            
+            # Статистика
+            st.subheader("📈 Статистика")
+            
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                # Таца расходов по категориям
-                category_df = pd.DataFrame({
-                    'Категория': expense_by_category.index,
-                    'Сумма': expense_by_category.values
-                }).sort_values('Сумма', ascending=False)
+                total_count = len(filtered_df)
+                st.metric("Всего операций", total_count)
+            
+            with col2:
+                total_income = filtered_df[filtered_df['type'] == 'income']['amount'].sum()
+                st.metric("📈 Общий доход", f"{total_income:,.2f} ₽")
+            
+            with col3:
+                total_expense = abs(filtered_df[filtered_df['type'] == 'expense']['amount'].sum())
+                st.metric("📉 Общие расходы", f"{total_expense:,.2f} ₽")
+            
+            with col4:
+                balance = total_income - total_expense
+                st.metric("💰 Баланс", f"{balance:+,.2f} ₽")
+            
+            # Анализ по категориям
+            st.subheader("📊 Расходы по категориям")
+            
+            expense_by_category = filtered_df[filtered_df['type'] == 'expense'].groupby('category')['amount'].sum().abs()
+            
+            if not expense_by_category.empty:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Таблица расходов по категориям
+                    category_df = pd.DataFrame({
+                        'Категория': expense_by_category.index,
+                        'Сумма': expense_by_category.values
+                    }).sort_values('Сумма', ascending=False)
+                    
+                    st.dataframe(
+                        category_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Категория": "Категория",
+                            "Сумма": st.column_config.NumberColumn(
+                                "Сумма (₽)",
+                                format="%.2f ₽"
+                            )
+                        }
+                    )
+                
+                with col2:
+                    # Круговая диаграмма
+                    if len(expense_by_category) > 0:
+                        fig, ax = plt.subplots(figsize=(8, 8))
+                        wedges, texts, autotexts = ax.pie(
+                            expense_by_category.values, 
+                            labels=expense_by_category.index, 
+                            autopct='%1.1f%%',
+                            startangle=90
+                        )
+                        ax.set_title('Распределение расходов по категориям')
+                        ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle
+                        st.pyplot(fig)
+            
+            # Топ-5 самых крупных трат
+            st.subheader("🔥 Топ-5 самых крупных трат")
+
+            top_expenses = filtered_df[filtered_df['type'] == 'expense'].copy()
+            if not top_expenses.empty:
+                # Берем 5 самых крупных трат (самые отрицательные значения)
+                top_expenses = top_expenses.nsmallest(5, 'amount')  # nsmallest потому что траты отрицательные
+                
+                top_expenses_display = top_expenses.copy()
+                top_expenses_display['Дата'] = top_expenses_display['date'].dt.strftime('%d.%m.%Y')
+                top_expenses_display['Сумма'] = top_expenses_display['amount'].apply(lambda x: f"{x:+,.2f} ₽")
+                
+                # Сортируем по абсолютному значению (самые крупные сверху)
+                top_expenses_display['abs_amount'] = top_expenses_display['amount'].abs()
+                top_expenses_display = top_expenses_display.sort_values('abs_amount', ascending=False)
                 
                 st.dataframe(
-                    category_df,
+                    top_expenses_display[['Дата', 'category', 'Сумма', 'description']],
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "Категория": "Категория",
-                        "Сумма": st.column_config.NumberColumn(
-                            "Сумма (₽)",
-                            format="%d ₽"
-                        )
+                        "Дата": "Дата",
+                        "category": "Категория",
+                        "Сумма": "Сумма",
+                        "description": "Описание"
                     }
                 )
             
-            with col2:
-                # Круговая диаграмма
-                if len(expense_by_category) > 0:
-                    fig, ax = plt.subplots()
-                    ax.pie(expense_by_category.values, labels=expense_by_category.index, autopct='%1.1f%%')
-                    ax.set_title('Распределение расходов')
-                    st.pyplot(fig)
-        
-        # График расходов по времени
-        st.subheader("📅 Динамика расходов")
-        
-        if not filtered_df.empty:
-            # Группировка по дате
-            daily_expenses = filtered_df[filtered_df['amount'] < 0].copy()
-            daily_expenses['day'] = daily_expenses['date'].dt.date
-            daily_totals = daily_expenses.groupby('day')['amount'].sum().abs()
+            # График расходов по времени
+            st.subheader("📅 Динамика расходов")
             
-            if not daily_totals.empty:
-                # Линейный график
-                st.line_chart(daily_totals)
+            if not filtered_df.empty:
+                # Группировка по дате
+                daily_expenses = filtered_df[filtered_df['type'] == 'expense'].copy()
+                if not daily_expenses.empty:
+                    daily_expenses['day'] = daily_expenses['date'].dt.date
+                    daily_totals = daily_expenses.groupby('day')['amount'].sum().abs()
+                    
+                    if not daily_totals.empty:
+                        # Линейный график
+                        st.line_chart(daily_totals)
+        
+        else:
+            st.info("Нет транзакций по выбранным фильтрам")
     
     else:
-        st.info("Нет транзакций по выбранным фильтрам")
+        st.info("💸 Нет транзакций для отображения. Добавьте транзакции или проверьте файл данных.")
 
 def show_optimization_page():
     """Страница оптимизации - ТЕПЕРЬ РАБОТАЕТ!"""
@@ -603,6 +668,7 @@ def show_optimization_page():
     
     # Кнопка расчета
     if st.button("🧮 Рассчитать эффект оптимизации", type="primary"):
+        st.balloons()
         if optimization_results:
             total_savings = sum(item["savings"] for item in optimization_results.values())
             
